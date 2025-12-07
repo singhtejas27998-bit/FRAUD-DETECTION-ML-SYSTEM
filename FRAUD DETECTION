@@ -1,0 +1,204 @@
+"""
+Fraud Detection ML System (Python + scikit-learn)
+
+Requirements:
+    pip install pandas numpy scikit-learn joblib
+"""
+
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_auc_score
+)
+import joblib
+
+
+def load_data(csv_path: str, target_col: str = "is_fraud") -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Load dataset and split into features (X) and label (y).
+    csv_path: path to your transactions CSV
+    target_col: name of the fraud label column (0 = legit, 1 = fraud)
+    """
+    df = pd.read_csv(csv_path)
+
+    if target_col not in df.columns:
+        raise ValueError(f"Target column '{target_col}' not found in CSV columns: {df.columns.tolist()}")
+
+    X = df.drop(columns=[target_col])
+    y = df[target_col]
+
+    return X, y
+
+
+def build_pipeline(X: pd.DataFrame) -> Pipeline:
+    """
+    Build preprocessing + model pipeline.
+    Automatically detects numeric and categorical columns.
+    """
+    numeric_features = X.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_features = X.select_dtypes(exclude=[np.number]).columns.tolist()
+
+    numeric_transformer = StandardScaler()
+    categorical_transformer = OneHotEncoder(handle_unknown="ignore")
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", numeric_transformer, numeric_features),
+            ("cat", categorical_transformer, categorical_features),
+        ],
+        remainder="drop",
+    )
+
+    model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=None,
+        n_jobs=-1,
+        class_weight="balanced",  # important for imbalanced fraud data
+        random_state=42,
+    )
+
+    clf = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("classifier", model),
+        ]
+    )
+
+    return clf
+
+
+def train_fraud_model(
+    csv_path: str,
+    target_col: str = "is_fraud",
+    test_size: float = 0.2,
+    model_path: str = "fraud_model.joblib",
+) -> Pipeline:
+    """
+    Train the fraud detection model, evaluate it, and save it to disk.
+    Returns the trained pipeline.
+    """
+    # 1. Load data
+    X, y = load_data(csv_path, target_col=target_col)
+
+    print("Dataset shape:", X.shape)
+    print("Class distribution:")
+    print(y.value_counts(normalize=True))
+
+    # 2. Train-test split (with stratify to keep same fraud ratio)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=test_size,
+        stratify=y,
+        random_state=42,
+    )
+
+    # 3. Build pipeline
+    clf = build_pipeline(X)
+
+    # 4. Train
+    print("\nTraining model...")
+    clf.fit(X_train, y_train)
+
+    # 5. Evaluate
+    print("\nEvaluating model...")
+    y_pred = clf.predict(X_test)
+
+    if hasattr(clf.named_steps["classifier"], "predict_proba"):
+        y_proba = clf.predict_proba(X_test)[:, 1]
+        roc_auc = roc_auc_score(y_test, y_proba)
+        print("ROC-AUC:", roc_auc)
+    else:
+        roc_auc = None
+
+    print("\nConfusion Matrix:")
+    print(confusion_matrix(y_test, y_pred))
+
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred, digits=4))
+
+    # 6. Save model
+    joblib.dump(clf, model_path)
+    print(f"\nModel saved to: {model_path}")
+
+    return clf
+
+
+def load_trained_model(model_path: str = "fraud_model.joblib") -> Pipeline:
+    """
+    Load a previously trained fraud detection model.
+    """
+    return joblib.load(model_path)
+
+
+def predict_single_transaction(
+    model: Pipeline,
+    transaction_data: dict,
+) -> tuple[int, float | None]:
+    """
+    Predict fraud for a single transaction.
+
+    transaction_data: dictionary of feature_name -> value, e.g.
+        {
+            "amount": 1200.50,
+            "country": "IN",
+            "device_type": "mobile",
+            "hour_of_day": 23,
+            ...
+        }
+
+    Returns:
+        predicted_label (0=legit, 1=fraud),
+        fraud_probability (if available, else None)
+    """
+    # Convert dict to single-row DataFrame
+    X_new = pd.DataFrame([transaction_data])
+
+    pred_label = model.predict(X_new)[0]
+
+    fraud_prob = None
+    if hasattr(model.named_steps["classifier"], "predict_proba"):
+        fraud_prob = float(model.predict_proba(X_new)[:, 1][0])
+
+    return int(pred_label), fraud_prob
+
+
+if __name__ == "__main__":
+    # --------- TRAINING EXAMPLE ---------
+    # 1) Put your dataset path here.
+    # CSV must contain a target column (e.g. is_fraud: 0 or 1)
+    # Example columns:
+    #   transaction_id, amount, country, device_type, hour_of_day, ..., is_fraud
+    #
+    # Change "transactions.csv" and "is_fraud" to match your file.
+    csv_path = "transactions.csv"
+    target_column = "is_fraud"
+
+    model = train_fraud_model(
+        csv_path=csv_path,
+        target_col=target_column,
+        test_size=0.2,
+        model_path="fraud_model.joblib",
+    )
+
+    # --------- PREDICTION EXAMPLE ---------
+    example_tx = {
+        "amount": 950.75,
+        "country": "IN",
+        "device_type": "mobile",
+        "hour_of_day": 2,
+        # add all other required feature columns here
+    }
+
+    label, prob = predict_single_transaction(model, example_tx)
+    print("\nSingle transaction prediction:")
+    print("Predicted label (0=legit, 1=fraud):", label)
+    print("Fraud probability:", prob)
